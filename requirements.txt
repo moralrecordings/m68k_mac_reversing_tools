@@ -1,0 +1,3 @@
+mrcrowbar >= 0.9.0
+macresources >= 1.2
+machfs >= 1.3

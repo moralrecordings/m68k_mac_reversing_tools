@@ -1,4 +1,6 @@
-import struct
+from mrcrowbar.lib.containers import mac
+from mrcrowbar import utils
+
 import machfs
 import macresources
 import collections
@@ -9,34 +11,20 @@ SYSTEM_RAM_SIZE = 0x10000
 DUMMY_ADDR = 0xFFFFFFFF
 
 # m68k is big endian
-def u16(x):
-    return struct.unpack(">H", x)[0]
+u16 = utils.from_uint16_be
+i16 = utils.from_int16_be
+u32 = utils.from_uint32_be
 
+to_u16 = utils.to_uint16_be
+to_u32 = utils.to_uint32_be
 
-def u16s(x):
-    return struct.unpack(">h", x)[0]
-
-
-def u32(x):
-    return struct.unpack(">I", x)[0]
-
-
-def p16(x):
-    return struct.pack(">H", x)
-
-
-def p32(x):
-    return struct.pack(">I", x)
-
-
-def u16_to_s16(x):
+def u16_to_i16(x: int) -> int:
     if x & 0x8000:
         x -= 0x10000
     return x
 
 
-def dump_file(image_filename, path, out_filename):
-    print(f"dumping {'/'.join([image_filename]+path)} to {out_filename}")
+def get_file_from_volume(image_filename: str, path: list[str]):
     rsrcs = collections.defaultdict(dict)
 
     with open(image_filename, "rb") as f:
@@ -49,6 +37,26 @@ def dump_file(image_filename, path, out_filename):
         for i in macresources.parse_file(v.rsrc):
             rsrcs[i.type][i.id] = i
 
+        return v.data, rsrcs    
+
+
+def get_file_from_macbinary(path: str, out_filename: str):
+    f = open(path, 'rb').read()
+    mb = mac.MacBinary(f)    
+    rsrcs = collections.defaultdict(dict)
+    for i in macresources.parse_file(mb.resource):
+        rsrcs[i.type][i.id] = i
+
+    return mb.data, rsrcs    
+
+
+def dump_file(image_filename, path, out_filename):
+    print(f"dumping {'/'.join([image_filename]+path)} to {out_filename}")
+    _, rsrcs = get_file_from_volume(image_filename, path)
+    return dump_file_from_resources(rsrcs, out_filename)
+
+
+def dump_file_from_resources(rsrcs, out_filename):
     for i in rsrcs:
         print(i)
         for j, r in rsrcs[i].items():
@@ -90,10 +98,10 @@ def dump_file(image_filename, path, out_filename):
     # small function to force binary ninja to set the value of a5 as a global reg
     # move.l #a5_value, a5
     # rts
-    header += b"\x2a\x7c" + p32(a5) + b"\x4e\x75"
+    header += b"\x2a\x7c" + to_u32(a5) + b"\x4e\x75"
 
     system_ram = bytearray(header + bytes(SYSTEM_RAM_SIZE - len(header)))
-    system_ram[0x904:0x908] = p32(a5)
+    system_ram[0x904:0x908] = to_u32(a5)
     dump += system_ram
 
     if b"STRS" in rsrcs:
@@ -140,7 +148,7 @@ def dump_file(image_filename, path, out_filename):
                     base = a5
                 data = u32(segment_data[addr : addr + 4])
                 data2 = (data + base) & 0xFFFFFFFF
-                segment_data[addr : addr + 4] = p32(data2)
+                segment_data[addr : addr + 4] = to_u32(data2)
                 print(f"seg {i} addr {addr:04x} ({data:08x} -> {data2:08x})")
         dump += bytes(segment_data)
 
@@ -182,9 +190,9 @@ def dump_file(image_filename, path, out_filename):
             )
             segment_num = 0  # dummy
             addr = DUMMY_ADDR
-        a5_world += p16(segment_num)
+        a5_world += to_u16(segment_num)
         a5_world += b"\x4e\xf9"  # jmp
-        a5_world += p32(addr)
+        a5_world += to_u32(addr)
 
     below_a5_data = bytes(below_a5_size)
 
@@ -207,21 +215,21 @@ def dump_file(image_filename, path, out_filename):
             drel_rsrc = bytes(rsrcs[b"DREL"][0])
             i = 0
             while i < len(drel_rsrc):
-                addr = u16s(drel_rsrc[i : i + 2])
+                addr = i16(drel_rsrc[i : i + 2])
                 if addr >= 0:
                     i += 2
                     addr = -u16(drel_rsrc[i : i + 2])
                 if addr & 0x1:
                     print("STRS patch ", end="")
                     base = strs_base
-                    addr = u16_to_s16(addr & 0xFFFE)
+                    addr = u16_to_i16(addr & 0xFFFE)
                 else:
                     print("A5 patch ", end="")
                     base = a5
                 addr += below_a5_size  # DREL relative to a5
                 data = u32(below_a5_data[addr : addr + 4])
                 data2 = (data + base) & 0xFFFFFFFF
-                below_a5_data[addr : addr + 4] = p32(data2)
+                below_a5_data[addr : addr + 4] = to_u32(data2)
                 print(f"data addr {addr:04x} ({data:08x} -> {data2:08x})")
                 i += 2
             below_a5_data = bytes(below_a5_data) + bytes(
@@ -237,4 +245,4 @@ def dump_file(image_filename, path, out_filename):
 
 # dump_file('HeavenEarth13Color.toast', ['Heaven & Earth'], 'dump_heavenandearth')
 # dump_file('disk2.dsk', ["System's Twilight"], 'dump_systemstwilight')
-dump_file("testfile.bin", ["Kid Pix"], "dump_kidpix")
+#dump_file("testfile.bin", ["Kid Pix"], "dump_kidpix")
