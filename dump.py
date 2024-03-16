@@ -1,9 +1,17 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import os
 from mrcrowbar.lib.containers import mac
 from mrcrowbar import utils
 
 import machfs
 import macresources
+
+import argparse
 import collections
+
+ResourceFork = dict[bytes, dict[int, macresources.main.Resource]]
 
 # make custom jank dump of code
 
@@ -24,42 +32,55 @@ def u16_to_i16(x: int) -> int:
     return x
 
 
-def get_file_from_volume(image_filename: str, path: list[str]):
-    rsrcs = collections.defaultdict(dict)
+def get_file_from_volume(image_filename: str, path: list[str] | None) -> tuple[bytes, ResourceFork]:
+    rsrcs: ResourceFork = collections.defaultdict(dict)
 
     with open(image_filename, "rb") as f:
         flat = f.read()
         v = machfs.Volume()
         v.read(flat)
         print(v)
-        for i in path:
-            v = v[i]
-        for i in macresources.parse_file(v.rsrc):
-            rsrcs[i.type][i.id] = i
+        if not path:
+            raise ValueError("Need to specify path")
+        for p in path:
+            v = v[p]
+        for ax in macresources.parse_file(v.rsrc):
+            rsrcs[ax.type][ax.id] = ax
 
         return v.data, rsrcs    
 
 
-def get_file_from_macbinary(path: str, out_filename: str):
+def get_file_from_macbinary(path: str) -> tuple[bytes, ResourceFork]:
     f = open(path, 'rb').read()
     mb = mac.MacBinary(f)    
-    rsrcs = collections.defaultdict(dict)
+    rsrcs: ResourceFork = collections.defaultdict(dict)
     for i in macresources.parse_file(mb.resource):
         rsrcs[i.type][i.id] = i
 
     return mb.data, rsrcs    
 
 
-def dump_file(image_filename, path, out_filename):
-    print(f"dumping {'/'.join([image_filename]+path)} to {out_filename}")
-    _, rsrcs = get_file_from_volume(image_filename, path)
-    return dump_file_from_resources(rsrcs, out_filename)
+def dump_file(source: str, target: str, path: list[str] | None) -> None:
+    print(f"dumping {':'.join([source]+(path if path else []))} to {target}")
+    with open(source, "rb") as f:
+        f.seek(122, os.SEEK_SET)
+        mb_test = (u16(f.read(2)) & 0xfcff) == 0x8081
+        f.seek(0x400, os.SEEK_SET)
+        vol_test = f.read(2)
+
+    if vol_test == b"BD" or vol_test == "H+":
+        _, rsrcs = get_file_from_volume(source, path)
+    elif mb_test:
+        _, rsrcs = get_file_from_macbinary(source)
+    else:
+        raise ValueError(f"File {source} must be a HFS disk image or MacBinary file")
+    return dump_file_from_resources(rsrcs, target)
 
 
-def dump_file_from_resources(rsrcs, out_filename):
-    for i in rsrcs:
-        print(i)
-        for j, r in rsrcs[i].items():
+def dump_file_from_resources(rsrcs: ResourceFork, out_filename: str) -> None:
+    for rx in rsrcs:
+        print(rx)
+        for j, r in rsrcs[rx].items():
             if r.name != None:
                 print(f"    {j}: {r.name}")
             else:
@@ -84,10 +105,10 @@ def dump_file_from_resources(rsrcs, out_filename):
     assert jump_table_offset == 0x20
 
     a5 = below_a5_size + SYSTEM_RAM_SIZE
-    for i in codes:
-        if i == 0:
+    for c in codes:
+        if c == 0:
             continue
-        a5 += len(codes[i]) - 4
+        a5 += len(codes[c]) - 4
     if b"STRS" in rsrcs:
         a5 += len(rsrcs[b"STRS"][0])
 
@@ -109,12 +130,12 @@ def dump_file_from_resources(rsrcs, out_filename):
         dump += rsrcs[b"STRS"][0]
 
     segment_bases = {}
-    for i in codes:
-        if i == 0:
+    for c in codes:
+        if c == 0:
             continue
-        segment_header = codes[i][:4]
-        segment_data = bytearray(codes[i][4:])
-        segment_bases[i] = len(dump)
+        segment_header = codes[c][:4]
+        segment_data = bytearray(codes[c][4:])
+        segment_bases[c] = len(dump)
         first_jumptable_entry_offset = u16(segment_header[:2])
         needs_relocations = False
         if first_jumptable_entry_offset & 0x8000:
@@ -126,7 +147,7 @@ def dump_file_from_resources(rsrcs, out_filename):
             jumptable_entry_num &= ~0x8000
             far_header = True
         print(
-            f"code segment {i}: first offset {first_jumptable_entry_offset:04x}, {jumptable_entry_num} jumptable entries",
+            f"code segment {c}: first offset {first_jumptable_entry_offset:04x}, {jumptable_entry_num} jumptable entries",
             end="",
         )
         if needs_relocations:
@@ -137,8 +158,8 @@ def dump_file_from_resources(rsrcs, out_filename):
         # Think C (Symantec) relocations
         if needs_relocations and jumptable_entry_num > 0:
             # TODO: refactor
-            for j in range(0, len(crels[i]), 2):
-                addr = u16(crels[i][j : j + 2]) - 4  # -4 from header
+            for j in range(0, len(crels[c]), 2):
+                addr = u16(crels[c][j : j + 2]) - 4  # -4 from header
                 if addr & 0x1:
                     print("STRS patch ", end="")
                     base = strs_base
@@ -149,7 +170,7 @@ def dump_file_from_resources(rsrcs, out_filename):
                 data = u32(segment_data[addr : addr + 4])
                 data2 = (data + base) & 0xFFFFFFFF
                 segment_data[addr : addr + 4] = to_u32(data2)
-                print(f"seg {i} addr {addr:04x} ({data:08x} -> {data2:08x})")
+                print(f"seg {c} addr {addr:04x} ({data:08x} -> {data2:08x})")
         dump += bytes(segment_data)
 
     # construct a5 world
@@ -242,6 +263,20 @@ def dump_file_from_resources(rsrcs, out_filename):
 
     open(out_filename, "wb").write(dump)
 
+
+def main():
+    parser = argparse.ArgumentParser(description="Dump and preprocess M68K Macintosh code")
+    parser.add_argument("source", help="Source file (disk image or MacBinary file)")
+    parser.add_argument("target", help="Output file")
+    parser.add_argument("--path", help="For disk images, path in the image to read (e.g. \"dir1:dir2:file\")")
+    args = parser.parse_args()
+
+    path = args.path.split(":") if args.path else None
+    dump_file(args.source, args.target, path)
+
+
+if __name__ == '__main__':
+    main()
 
 # dump_file('HeavenEarth13Color.toast', ['Heaven & Earth'], 'dump_heavenandearth')
 # dump_file('disk2.dsk', ["System's Twilight"], 'dump_systemstwilight')
