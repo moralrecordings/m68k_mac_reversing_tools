@@ -76,7 +76,6 @@ def dump_file(source: str, target: str, path: list[str] | None) -> None:
         raise ValueError(f"File {source} must be a HFS disk image or MacBinary file")
     return dump_file_from_resources(rsrcs, target)
 
-
 def dump_file_from_resources(rsrcs: ResourceFork, out_filename: str) -> None:
     for rx in rsrcs:
         print(rx)
@@ -85,13 +84,13 @@ def dump_file_from_resources(rsrcs: ResourceFork, out_filename: str) -> None:
                 print(f"    {j}: {r.name}")
             else:
                 print(f"    {j}")
+    if b"CODE" in rsrcs:
+        dump_file_from_code(rsrcs, out_filename)
+    elif b"XCMD" in rsrcs:
+        dump_file_from_xcmd(rsrcs, out_filename)
 
-    if b"CODE" not in rsrcs:
-        print("Error: no executable code?")
-        return
 
-    # TODO: other resource types
-
+def dump_file_from_code(rsrcs: ResourceFork, out_filename: str) -> None:
     codes = rsrcs[b"CODE"]
     crels = rsrcs[b"CREL"]
 
@@ -258,6 +257,46 @@ def dump_file_from_resources(rsrcs: ResourceFork, out_filename: str) -> None:
             )
 
     dump += below_a5_data
+    assert len(dump) == a5
+    dump += a5_world
+
+    open(out_filename, "wb").write(dump)
+
+def dump_file_from_xcmd(rsrcs: ResourceFork, out_filename: str) -> None:
+    xcmds = rsrcs[b"XCMD"]
+    
+    a5 = SYSTEM_RAM_SIZE
+    for c in xcmds:
+        a5 += len(xcmds[c]) - 4
+
+    dump = b""
+    header = (
+        b"J\xffA\xffN\xffK\xff"  # put garbage so address 0 isn't recognized as a string
+    )
+    # small function to force binary ninja to set the value of a5 as a global reg
+    # move.l #a5_value, a5
+    # rts
+    header += b"\x2a\x7c" + to_u32(a5) + b"\x4e\x75"
+    system_ram = bytearray(header + bytes(SYSTEM_RAM_SIZE - len(header)))
+    system_ram[0x904:0x908] = to_u32(a5)
+    dump += system_ram
+
+    segment_bases = {}
+
+    for c in xcmds:
+        if c == 0:
+            continue
+        segment_data = bytearray(xcmds[c][4:])
+        segment_bases[c] = len(dump)
+        print(
+            f"XCMD {c}: first offset {segment_bases[c]:04x}",
+            end="",
+        )
+        dump += bytes(segment_data)
+
+    # construct a5 world
+    a5_world = b"\x00" * 32  # TODO pointer to quickdraw global vars
+
     assert len(dump) == a5
     dump += a5_world
 
